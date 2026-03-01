@@ -1,5 +1,5 @@
 'use client';
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { storage } from '@/lib/storage';
 import { buildRoleplayPrompt, buildScorecardPrompt } from '@/lib/prompts';
@@ -12,8 +12,12 @@ export default function ChatPage() {
   const [loading, setLoading] = useState(false);
   const [initializing, setInitializing] = useState(true);
   const [ending, setEnding] = useState(false);
+  const [listening, setListening] = useState(false);
+  const [speaking, setSpeaking] = useState(false);
+  const [voiceEnabled, setVoiceEnabled] = useState(true);
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
+  const recognitionRef = useRef(null);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -22,6 +26,77 @@ export default function ChatPage() {
   useEffect(() => {
     scrollToBottom();
   }, [messages, loading]);
+
+  // Initialize speech recognition
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (SpeechRecognition) {
+        const recognition = new SpeechRecognition();
+        recognition.continuous = false;
+        recognition.interimResults = true;
+        recognition.lang = 'en-US';
+
+        recognition.onresult = (event) => {
+          let transcript = '';
+          for (let i = event.resultIndex; i < event.results.length; i++) {
+            transcript += event.results[i][0].transcript;
+          }
+          setInput(transcript);
+        };
+
+        recognition.onend = () => {
+          setListening(false);
+        };
+
+        recognition.onerror = (event) => {
+          console.error('Speech recognition error:', event.error);
+          setListening(false);
+        };
+
+        recognitionRef.current = recognition;
+      }
+    }
+  }, []);
+
+  // Text-to-speech function
+  const speakText = useCallback((text) => {
+    if (!voiceEnabled) return;
+    if (typeof window === 'undefined' || !window.speechSynthesis) return;
+
+    window.speechSynthesis.cancel();
+
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.rate = 1.0;
+    utterance.pitch = 1.0;
+    utterance.volume = 1.0;
+
+    const voices = window.speechSynthesis.getVoices();
+    const preferred = voices.find(v =>
+      v.name.includes('Samantha') ||
+      v.name.includes('Daniel') ||
+      v.name.includes('Google US English') ||
+      v.name.includes('Alex')
+    ) || voices.find(v => v.lang.startsWith('en')) || voices[0];
+
+    if (preferred) utterance.voice = preferred;
+
+    utterance.onstart = () => setSpeaking(true);
+    utterance.onend = () => setSpeaking(false);
+    utterance.onerror = () => setSpeaking(false);
+
+    window.speechSynthesis.speak(utterance);
+  }, [voiceEnabled]);
+
+  // Load voices
+  useEffect(() => {
+    if (typeof window !== 'undefined' && window.speechSynthesis) {
+      window.speechSynthesis.getVoices();
+      window.speechSynthesis.onvoiceschanged = () => {
+        window.speechSynthesis.getVoices();
+      };
+    }
+  }, []);
 
   // Load session and get first AI message
   useEffect(() => {
@@ -32,7 +107,6 @@ export default function ChatPage() {
     }
     setSession(current);
 
-    // Get opening line from AI buyer
     async function getOpening() {
       try {
         const systemPrompt = buildRoleplayPrompt(current.scenario, current.difficulty);
@@ -50,6 +124,7 @@ export default function ChatPage() {
           const aiMsg = { role: 'assistant', content: data.text };
           setMessages([aiMsg]);
           storage.saveCurrent({ ...current, messages: [aiMsg] });
+          setTimeout(() => speakText(data.text), 500);
         }
       } catch (err) {
         console.error('Failed to get opening:', err);
@@ -64,24 +139,45 @@ export default function ChatPage() {
     } else {
       getOpening();
     }
-  }, [router]);
+  }, [router, speakText]);
+
+  function toggleListening() {
+    if (!recognitionRef.current) {
+      alert('Speech recognition is not supported in your browser. Try Chrome or Safari.');
+      return;
+    }
+
+    if (listening) {
+      recognitionRef.current.stop();
+      setListening(false);
+    } else {
+      if (window.speechSynthesis) window.speechSynthesis.cancel();
+      setSpeaking(false);
+      setInput('');
+      recognitionRef.current.start();
+      setListening(true);
+    }
+  }
 
   async function sendMessage() {
-    if (!input.trim() || loading || !session) return;
+    const messageText = input.trim();
+    if (!messageText || loading || !session) return;
 
-    const userMsg = { role: 'user', content: input.trim() };
+    if (listening && recognitionRef.current) {
+      recognitionRef.current.stop();
+      setListening(false);
+    }
+
+    const userMsg = { role: 'user', content: messageText };
     const newMessages = [...messages, userMsg];
     setMessages(newMessages);
     setInput('');
     setLoading(true);
 
-    // Save progress
     storage.saveCurrent({ ...session, messages: newMessages });
 
     try {
       const systemPrompt = buildRoleplayPrompt(session.scenario, session.difficulty);
-
-      // Build conversation for API (skip the initial "begin" prompt)
       const apiMessages = newMessages.map(m => ({
         role: m.role,
         content: m.content,
@@ -103,6 +199,7 @@ export default function ChatPage() {
         const updatedMessages = [...newMessages, aiMsg];
         setMessages(updatedMessages);
         storage.saveCurrent({ ...session, messages: updatedMessages });
+        speakText(data.text);
       }
     } catch (err) {
       console.error('Send error:', err);
@@ -116,7 +213,8 @@ export default function ChatPage() {
     if (ending) return;
     setEnding(true);
 
-    // Need at least 2 seller messages for a meaningful scorecard
+    if (window.speechSynthesis) window.speechSynthesis.cancel();
+
     const sellerMessages = messages.filter(m => m.role === 'user');
     if (sellerMessages.length < 2) {
       alert('Keep going — you need at least 2 responses for a scorecard.');
@@ -140,7 +238,6 @@ export default function ChatPage() {
       let scorecard;
 
       try {
-        // Clean potential markdown wrapping
         let cleaned = data.text.trim();
         if (cleaned.startsWith('```')) {
           cleaned = cleaned.replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '');
@@ -163,7 +260,6 @@ export default function ChatPage() {
         };
       }
 
-      // Save completed session
       const completedSession = {
         scenario: session.scenario,
         difficulty: session.difficulty,
@@ -206,6 +302,25 @@ export default function ChatPage() {
           <span className={`chat-diff ${session.difficulty}`}>
             {session.difficulty}
           </span>
+          <button
+            onClick={() => {
+              if (window.speechSynthesis) window.speechSynthesis.cancel();
+              setSpeaking(false);
+              setVoiceEnabled(!voiceEnabled);
+            }}
+            style={{
+              background: voiceEnabled ? 'var(--gold)' : '#333',
+              border: 'none',
+              borderRadius: '8px',
+              padding: '4px 8px',
+              fontSize: '16px',
+              cursor: 'pointer',
+              transition: 'all 0.15s',
+            }}
+            title={voiceEnabled ? 'Mute voice' : 'Enable voice'}
+          >
+            {voiceEnabled ? '🔊' : '🔇'}
+          </button>
           <button className="end-btn" onClick={endSession} disabled={ending}>
             {ending ? 'Scoring...' : 'End & Score'}
           </button>
@@ -228,12 +343,38 @@ export default function ChatPage() {
         {messages.map((msg, i) => (
           <div key={i} className={`msg ${msg.role === 'user' ? 'user' : 'ai'}`}>
             {msg.content}
+            {msg.role === 'assistant' && voiceEnabled && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  speakText(msg.content);
+                }}
+                style={{
+                  background: 'transparent',
+                  border: 'none',
+                  color: 'var(--text-muted)',
+                  fontSize: '14px',
+                  cursor: 'pointer',
+                  padding: '4px',
+                  marginTop: '4px',
+                  display: 'block',
+                }}
+              >
+                🔊 Replay
+              </button>
+            )}
           </div>
         ))}
 
         {loading && (
           <div className="typing-indicator">
             <span></span><span></span><span></span>
+          </div>
+        )}
+
+        {speaking && (
+          <div className="msg system" style={{ fontSize: '12px' }}>
+            🔊 AI buyer is speaking...
           </div>
         )}
 
@@ -249,15 +390,40 @@ export default function ChatPage() {
       {/* Input */}
       {!ending && (
         <div className="chat-input-row">
+          <button
+            onClick={toggleListening}
+            className="mic-btn"
+            style={{
+              width: '48px',
+              height: '48px',
+              border: listening ? '2px solid var(--red)' : '2px solid #333',
+              borderRadius: '14px',
+              background: listening ? '#ef444430' : 'var(--bg-input)',
+              color: listening ? 'var(--red)' : 'var(--text-muted)',
+              fontSize: '20px',
+              cursor: 'pointer',
+              flexShrink: 0,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              transition: 'all 0.15s',
+            }}
+            disabled={loading || initializing}
+            title={listening ? 'Stop listening' : 'Speak your response'}
+          >
+            🎤
+          </button>
+
           <textarea
             ref={inputRef}
             className="chat-input"
-            placeholder="Your response as the seller..."
+            placeholder={listening ? '🎤 Listening...' : 'Type or tap mic to speak...'}
             value={input}
             onChange={e => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
             disabled={loading || initializing}
             rows={1}
+            style={listening ? { borderColor: 'var(--red)', background: '#ef444410' } : {}}
           />
           <button
             className="send-btn"
@@ -266,6 +432,18 @@ export default function ChatPage() {
           >
             ↑
           </button>
+        </div>
+      )}
+
+      {listening && (
+        <div style={{
+          textAlign: 'center',
+          color: 'var(--red)',
+          fontSize: '13px',
+          fontWeight: '600',
+          padding: '4px 0',
+        }}>
+          🎤 Listening... tap mic to stop, then send
         </div>
       )}
     </div>
