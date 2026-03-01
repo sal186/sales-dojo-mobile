@@ -15,6 +15,7 @@ export default function ChatPage() {
   const [listening, setListening] = useState(false);
   const [speaking, setSpeaking] = useState(false);
   const [voiceEnabled, setVoiceEnabled] = useState(true);
+  const [selectedVoice, setSelectedVoice] = useState(null);
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
   const recognitionRef = useRef(null);
@@ -26,6 +27,43 @@ export default function ChatPage() {
   useEffect(() => {
     scrollToBottom();
   }, [messages, loading]);
+
+  // Find the best available voice
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.speechSynthesis) return;
+
+    function pickBestVoice() {
+      const voices = window.speechSynthesis.getVoices();
+      if (voices.length === 0) return;
+
+      // Priority list: most natural-sounding voices first
+      const preferred = [
+        // macOS premium voices
+        'Evan', 'Ava', 'Zoe', 'Samantha', 'Tom', 'Daniel',
+        // Google voices (Chrome)
+        'Google US English', 'Google UK English Male', 'Google UK English Female',
+        // Microsoft voices (Edge)
+        'Microsoft Mark', 'Microsoft David', 'Microsoft Zira',
+        // iOS
+        'Aaron', 'Nicky', 'Moira',
+      ];
+
+      for (const name of preferred) {
+        const match = voices.find(v => v.name.includes(name));
+        if (match) {
+          setSelectedVoice(match);
+          return;
+        }
+      }
+
+      // Fallback: any English voice
+      const english = voices.find(v => v.lang.startsWith('en'));
+      if (english) setSelectedVoice(english);
+    }
+
+    pickBestVoice();
+    window.speechSynthesis.onvoiceschanged = pickBestVoice;
+  }, []);
 
   // Initialize speech recognition
   useEffect(() => {
@@ -59,7 +97,7 @@ export default function ChatPage() {
     }
   }, []);
 
-  // Text-to-speech function
+  // Text-to-speech function with best voice
   const speakText = useCallback((text) => {
     if (!voiceEnabled) return;
     if (typeof window === 'undefined' || !window.speechSynthesis) return;
@@ -67,36 +105,20 @@ export default function ChatPage() {
     window.speechSynthesis.cancel();
 
     const utterance = new SpeechSynthesisUtterance(text);
-    utterance.rate = 1.0;
-    utterance.pitch = 1.0;
+    utterance.rate = 0.95;
+    utterance.pitch = 1.05;
     utterance.volume = 1.0;
 
-    const voices = window.speechSynthesis.getVoices();
-    const preferred = voices.find(v =>
-      v.name.includes('Samantha') ||
-      v.name.includes('Daniel') ||
-      v.name.includes('Google US English') ||
-      v.name.includes('Alex')
-    ) || voices.find(v => v.lang.startsWith('en')) || voices[0];
-
-    if (preferred) utterance.voice = preferred;
+    if (selectedVoice) {
+      utterance.voice = selectedVoice;
+    }
 
     utterance.onstart = () => setSpeaking(true);
     utterance.onend = () => setSpeaking(false);
     utterance.onerror = () => setSpeaking(false);
 
     window.speechSynthesis.speak(utterance);
-  }, [voiceEnabled]);
-
-  // Load voices
-  useEffect(() => {
-    if (typeof window !== 'undefined' && window.speechSynthesis) {
-      window.speechSynthesis.getVoices();
-      window.speechSynthesis.onvoiceschanged = () => {
-        window.speechSynthesis.getVoices();
-      };
-    }
-  }, []);
+  }, [voiceEnabled, selectedVoice]);
 
   // Load session and get first AI message
   useEffect(() => {
@@ -239,25 +261,40 @@ export default function ChatPage() {
 
       try {
         let cleaned = data.text.trim();
+        // Remove markdown code fences if present
         if (cleaned.startsWith('```')) {
-          cleaned = cleaned.replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '');
+          cleaned = cleaned.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?\s*```$/, '');
         }
+        // Remove any leading/trailing whitespace
+        cleaned = cleaned.trim();
         scorecard = JSON.parse(cleaned);
       } catch (parseErr) {
-        console.error('Scorecard parse error:', parseErr, data.text);
-        scorecard = {
-          overallScore: 50,
-          grade: 'C',
-          dimensions: {
-            empathy: { score: 50, summary: 'Could not fully analyze.' },
-            objectionHandling: { score: 50, summary: 'Could not fully analyze.' },
-            clarity: { score: 50, summary: 'Could not fully analyze.' },
-            closingTechnique: { score: 50, summary: 'Could not fully analyze.' },
-            activeListening: { score: 50, summary: 'Could not fully analyze.' },
-          },
-          strengths: [],
-          improvements: [],
-        };
+        console.error('Scorecard parse error:', parseErr, 'Raw:', data.text);
+        // Try to extract JSON from response
+        try {
+          const jsonMatch = data.text.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            scorecard = JSON.parse(jsonMatch[0]);
+          }
+        } catch (e) {
+          // Final fallback
+        }
+
+        if (!scorecard) {
+          scorecard = {
+            overallScore: 50,
+            grade: 'C',
+            dimensions: {
+              empathy: { score: 50, summary: 'Session too short for detailed analysis.' },
+              objectionHandling: { score: 50, summary: 'Session too short for detailed analysis.' },
+              clarity: { score: 50, summary: 'Session too short for detailed analysis.' },
+              closingTechnique: { score: 50, summary: 'Session too short for detailed analysis.' },
+              activeListening: { score: 50, summary: 'Session too short for detailed analysis.' },
+            },
+            strengths: [{ quote: 'N/A', analysis: 'Have a longer conversation for better analysis.' }],
+            improvements: [{ quote: 'N/A', analysis: 'Have a longer conversation for better feedback.', rewrite: 'Try at least 5-6 exchanges for a meaningful scorecard.' }],
+          };
+        }
       }
 
       const completedSession = {
@@ -292,7 +329,6 @@ export default function ChatPage() {
 
   return (
     <div className="container" style={{ paddingBottom: '16px' }}>
-      {/* Chat Header */}
       <div className="chat-header">
         <div>
           <div className="chat-persona">🎭 AI Buyer</div>
@@ -327,12 +363,10 @@ export default function ChatPage() {
         </div>
       </div>
 
-      {/* Scenario reminder */}
       <div className="msg system">
         {session.scenario}
       </div>
 
-      {/* Messages */}
       <div className="chat-messages">
         {initializing && (
           <div className="typing-indicator">
@@ -387,12 +421,10 @@ export default function ChatPage() {
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Input */}
       {!ending && (
         <div className="chat-input-row">
           <button
             onClick={toggleListening}
-            className="mic-btn"
             style={{
               width: '48px',
               height: '48px',

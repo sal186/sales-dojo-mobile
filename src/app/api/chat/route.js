@@ -31,10 +31,16 @@ export async function POST(request) {
       contents: geminiMessages,
       generationConfig: {
         temperature: mode === 'scorecard' ? 0.3 : 0.8,
-        maxOutputTokens: mode === 'scorecard' ? 2048 : 256,
+        maxOutputTokens: mode === 'scorecard' ? 4096 : 512,
         topP: 0.9,
+        responseMimeType: mode === 'scorecard' ? 'application/json' : undefined,
       },
     };
+
+    // Clean undefined values
+    if (!body.generationConfig.responseMimeType) {
+      delete body.generationConfig.responseMimeType;
+    }
 
     const response = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`,
