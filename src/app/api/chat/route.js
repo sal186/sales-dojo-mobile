@@ -15,8 +15,8 @@ export async function POST(request) {
 
     // flash-lite for roleplay (cheap + fast), flash for scorecards (smarter)
     const model = mode === 'scorecard'
-      ? 'gemini-2.0-flash'
-      : 'gemini-2.0-flash-lite';
+      ? 'gemini-1.5-flash'
+      : 'gemini-1.5-flash';
 
     const geminiMessages = messages.map(m => ({
       role: m.role === 'user' ? 'user' : 'model',
