@@ -7,21 +7,18 @@ export async function POST(request) {
       return Response.json({ error: 'API key not configured' }, { status: 500 });
     }
 
-    const model = 'gemini-1.5-flash';
+    const model = 'gemini-2.0-flash';
 
-    // Map roles: Gemini uses "model" not "assistant"
     const geminiMessages = messages.map(m => ({
       role: m.role === 'assistant' ? 'model' : 'user',
       parts: [{ text: m.content }],
     }));
 
-    // Add system instruction as first user message if not already there
     if (systemPrompt) {
       geminiMessages.unshift({
         role: 'user',
         parts: [{ text: systemPrompt }],
       });
-      // Need a model response after system prompt if next is also user
       if (geminiMessages.length > 1 && geminiMessages[1].role === 'user') {
         geminiMessages.splice(1, 0, {
           role: 'model',
@@ -40,7 +37,7 @@ export async function POST(request) {
     };
 
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1/models/${model}:generateContent?key=${GEMINI_API_KEY}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
