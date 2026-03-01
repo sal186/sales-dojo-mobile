@@ -7,7 +7,7 @@ export async function POST(request) {
       return Response.json({ error: 'API key not configured' }, { status: 500 });
     }
 
-    const model = 'gemini-2.0-flash';
+    const model = 'gemini-2.5-flash';
 
     const geminiMessages = messages.map(m => ({
       role: m.role === 'assistant' ? 'model' : 'user',
