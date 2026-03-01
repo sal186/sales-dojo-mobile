@@ -1,8 +1,23 @@
 export async function POST(request) {
   try {
-    const { text } = await request.json();
+    const { text, gender } = await request.json();
     const key = process.env.GOOGLE_TTS_KEY || process.env.GEMINI_API_KEY;
     if (!key) return Response.json({ error: 'No key' }, { status: 500 });
+
+    const voiceName = gender === 'female' ? 'en-US-Studio-O' : 'en-US-Studio-M';
+
+    // Convert text to SSML for natural speech
+    let ssml = text
+      .replace(/\.\s/g, '.<break time="400ms"/> ')
+      .replace(/,\s/g, ',<break time="200ms"/> ')
+      .replace(/\?\s/g, '?<break time="300ms"/> ')
+      .replace(/!\s/g, '!<break time="300ms"/> ')
+      .replace(/—/g, '<break time="300ms"/>')
+      .replace(/\.\.\./g, '<break time="500ms"/>')
+      .replace(/"/g, '')
+      .replace(/&/g, '&amp;');
+
+    ssml = '<speak>' + ssml + '</speak>';
 
     const res = await fetch(
       'https://texttospeech.googleapis.com/v1/text:synthesize?key=' + key,
@@ -10,9 +25,14 @@ export async function POST(request) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          input: { text },
-          voice: { languageCode: 'en-US', name: 'en-US-Journey-F' },
-          audioConfig: { audioEncoding: 'MP3', speakingRate: 1.0, pitch: -1.0 },
+          input: { ssml },
+          voice: { languageCode: 'en-US', name: voiceName },
+          audioConfig: {
+            audioEncoding: 'MP3',
+            speakingRate: 0.95,
+            pitch: gender === 'female' ? 0.5 : -1.5,
+            effectsProfileId: ['handset-class-device'],
+          },
         }),
       }
     );
