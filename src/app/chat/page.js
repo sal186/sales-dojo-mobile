@@ -1,5 +1,5 @@
 'use client';
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { storage } from '@/lib/storage';
 import { buildRoleplayPrompt, buildScorecardPrompt, getRandomPersona } from '@/lib/prompts';
@@ -24,10 +24,14 @@ export default function ChatPage() {
   const silenceTimerRef = useRef(null);
   const pendingTextRef = useRef('');
   const autoSendRef = useRef(false);
+  const voiceModeRef = useRef(false);
+  const personaRef = useRef(null);
 
-  const scrollToBottom = () => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); };
-  useEffect(() => { scrollToBottom(); }, [messages, loading]);
+  useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, loading]);
+  useEffect(() => { voiceModeRef.current = voiceMode; }, [voiceMode]);
+  useEffect(() => { personaRef.current = persona; }, [persona]);
 
+  // Speech recognition
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -36,119 +40,100 @@ export default function ChatPage() {
     r.continuous = true;
     r.interimResults = true;
     r.lang = 'en-US';
-    r.onresult = (event) => {
-      let final = '';
-      let interim = '';
-      for (let i = 0; i < event.results.length; i++) {
-        if (event.results[i].isFinal) final += event.results[i][0].transcript + ' ';
+    r.onresult = function(event) {
+      var f = '', interim = '';
+      for (var i = 0; i < event.results.length; i++) {
+        if (event.results[i].isFinal) f += event.results[i][0].transcript + ' ';
         else interim += event.results[i][0].transcript;
       }
-      const full = (final + interim).trim();
+      var full = (f + interim).trim();
       pendingTextRef.current = full;
       setInput(full);
       if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-      if (autoSendRef.current && final.trim().length > 0) {
-        silenceTimerRef.current = setTimeout(() => {
+      if (autoSendRef.current && f.trim().length > 0) {
+        silenceTimerRef.current = setTimeout(function() {
           if (pendingTextRef.current.trim()) r.stop();
         }, 2000);
       }
     };
-    r.onend = () => {
+    r.onend = function() {
       setListening(false);
       if (autoSendRef.current && pendingTextRef.current.trim()) {
         autoSendRef.current = false;
-        setTimeout(() => { document.getElementById('auto-send-btn')?.click(); }, 100);
+        setTimeout(function() {
+          var btn = document.getElementById('auto-send-btn');
+          if (btn) btn.click();
+        }, 100);
       }
     };
-    r.onerror = () => setListening(false);
+    r.onerror = function() { setListening(false); };
     recognitionRef.current = r;
   }, []);
 
-  const speakText = useCallback(async (text, gender) => {
-    if (!voiceEnabled || typeof window === 'undefined') return;
-    if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }
-    setSpeaking(true);
-    try {
-      const res = await fetch('/api/tts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, gender: gender || 'male' }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.audioContent) {
-          const audio = new Audio('data:audio/mp3;base64,' + data.audioContent);
-          audioRef.current = audio;
-          audio.onended = () => {
-            setSpeaking(false); audioRef.current = null;
-            if (voiceMode && recognitionRef.current) {
-              setTimeout(() => startListening(true), 300);
-            }
-          };
-          audio.onerror = () => { setSpeaking(false); audioRef.current = null; };
-          await audio.play();
-          return;
-        }
-      }
-    } catch (err) { console.error('TTS error:', err); }
-    // Fallback browser voice
-    if (window.speechSynthesis) {
-      window.speechSynthesis.cancel();
-      const u = new SpeechSynthesisUtterance(text);
-      u.rate = 1.0; u.pitch = gender === 'female' ? 1.1 : 0.9;
-      const v = window.speechSynthesis.getVoices();
-      let pick;
-      if (gender === 'female') {
-        pick = v.find(x => x.name === 'Samantha') || v.find(x => x.name.includes('Female') && x.lang.startsWith('en')) || v.find(x => x.lang === 'en-US');
-      } else {
-        pick = v.find(x => x.name === 'Daniel') || v.find(x => x.name.includes('Male') && x.lang.startsWith('en')) || v.find(x => x.lang === 'en-US');
-      }
-      if (pick) u.voice = pick;
-      u.onend = () => {
-        setSpeaking(false);
-        if (voiceMode && recognitionRef.current) setTimeout(() => startListening(true), 300);
-      };
-      u.onerror = () => setSpeaking(false);
-      window.speechSynthesis.speak(u);
-    } else { setSpeaking(false); }
-  }, [voiceEnabled, voiceMode]);
-
+  // Voices
   useEffect(() => {
     if (typeof window !== 'undefined' && window.speechSynthesis) {
       window.speechSynthesis.getVoices();
-      window.speechSynthesis.onvoiceschanged = () => window.speechSynthesis.getVoices();
+      window.speechSynthesis.onvoiceschanged = function() { window.speechSynthesis.getVoices(); };
     }
   }, []);
 
-  useEffect(() => {
-    const current = storage.getCurrent();
-    if (!current) { router.push('/'); return; }
-    setSession(current);
+  function doSpeak(text, gender) {
+    if (!voiceEnabled || typeof window === 'undefined') return;
+    if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }
+    setSpeaking(true);
 
-    // Pick or restore persona
-    let p = current.persona || null;
-    if (!p || !p.name) { p = getRandomPersona(); storage.saveCurrent({ ...current, persona: p }); }
-    setPersona(p);
+    fetch('/api/tts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: text, gender: gender || 'male' }),
+    })
+    .then(function(res) { return res.ok ? res.json() : null; })
+    .then(function(data) {
+      if (data && data.audioContent) {
+        var audio = new Audio('data:audio/mp3;base64,' + data.audioContent);
+        audioRef.current = audio;
+        audio.onended = function() {
+          setSpeaking(false);
+          audioRef.current = null;
+          if (voiceModeRef.current && recognitionRef.current) {
+            setTimeout(function() { doStartListening(true); }, 300);
+          }
+        };
+        audio.onerror = function() { setSpeaking(false); audioRef.current = null; };
+        audio.play();
+      } else {
+        doFallbackSpeak(text, gender);
+      }
+    })
+    .catch(function() { doFallbackSpeak(text, gender); });
+  }
 
-    async function getOpening() {
-      try {
-        const sp = buildRoleplayPrompt(current.scenario, current.difficulty, p);
-        const res = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: [{ role: 'user', content: 'Begin the roleplay. Give your opening line as the buyer.' }], systemPrompt: sp, mode: 'roleplay' }) });
-        const data = await res.json();
-        if (data.text) {
-          const aiMsg = { role: 'assistant', content: data.text };
-          setMessages([aiMsg]);
-          storage.saveCurrent({ ...current, persona: p, messages: [aiMsg] });
-          setTimeout(() => speakText(data.text, p.gender), 500);
-        }
-      } catch (err) { console.error('Opening error:', err); }
-      finally { setInitializing(false); }
+  function doFallbackSpeak(text, gender) {
+    if (typeof window === 'undefined' || !window.speechSynthesis) { setSpeaking(false); return; }
+    window.speechSynthesis.cancel();
+    var u = new SpeechSynthesisUtterance(text);
+    u.rate = 1.0;
+    u.pitch = gender === 'female' ? 1.1 : 0.9;
+    var v = window.speechSynthesis.getVoices();
+    var pick = null;
+    if (gender === 'female') {
+      pick = v.find(function(x) { return x.name === 'Samantha'; }) || v.find(function(x) { return x.lang === 'en-US'; });
+    } else {
+      pick = v.find(function(x) { return x.name === 'Daniel'; }) || v.find(function(x) { return x.lang === 'en-US'; });
     }
-    if (current.messages && current.messages.length > 0) { setMessages(current.messages); setInitializing(false); }
-    else { getOpening(); }
-  }, [router, speakText]);
+    if (pick) u.voice = pick;
+    u.onend = function() {
+      setSpeaking(false);
+      if (voiceModeRef.current && recognitionRef.current) {
+        setTimeout(function() { doStartListening(true); }, 300);
+      }
+    };
+    u.onerror = function() { setSpeaking(false); };
+    window.speechSynthesis.speak(u);
+  }
 
-  function startListening(auto) {
+  function doStartListening(auto) {
     if (!recognitionRef.current || loading || initializing) return;
     if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }
     if (window.speechSynthesis) window.speechSynthesis.cancel();
@@ -159,7 +144,7 @@ export default function ChatPage() {
     try { recognitionRef.current.start(); setListening(true); } catch(e) {}
   }
 
-  function stopListening() {
+  function doStopListening() {
     if (recognitionRef.current && listening) {
       autoSendRef.current = false;
       recognitionRef.current.stop();
@@ -167,102 +152,157 @@ export default function ChatPage() {
     }
   }
 
-  function toggleVoiceMode() {
-    if (voiceMode) { setVoiceMode(false); stopListening(); }
-    else { setVoiceMode(true); setVoiceEnabled(true); startListening(true); }
-  }
+  // Load session
+  useEffect(() => {
+    var current = storage.getCurrent();
+    if (!current) { router.push('/'); return; }
+    setSession(current);
 
-  async function sendMessage() {
-    const text = input.trim();
+    var p = null;
+    try { p = current.persona; } catch(e) {}
+    if (!p || !p.name) { p = getRandomPersona(); }
+    setPersona(p);
+    personaRef.current = p;
+
+    if (current.messages && current.messages.length > 0) {
+      setMessages(current.messages);
+      setInitializing(false);
+    } else {
+      var sp = buildRoleplayPrompt(current.scenario, current.difficulty, p);
+      fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: [{ role: 'user', content: 'Begin the roleplay. Give your opening line as the buyer.' }], systemPrompt: sp, mode: 'roleplay' }),
+      })
+      .then(function(res) { return res.json(); })
+      .then(function(data) {
+        if (data.text) {
+          var aiMsg = { role: 'assistant', content: data.text };
+          setMessages([aiMsg]);
+          try { storage.saveCurrent({ scenario: current.scenario, difficulty: current.difficulty, persona: p, messages: [aiMsg], startedAt: current.startedAt }); } catch(e) {}
+          setTimeout(function() { doSpeak(data.text, p.gender); }, 500);
+        }
+        setInitializing(false);
+      })
+      .catch(function() { setInitializing(false); });
+    }
+  }, []);
+
+  function doSend() {
+    var text = input.trim();
     if (!text || loading || !session) return;
     if (listening && recognitionRef.current) { recognitionRef.current.stop(); setListening(false); }
     if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-    const userMsg = { role: 'user', content: text };
-    const newMsgs = [...messages, userMsg];
-    setMessages(newMsgs); setInput(''); pendingTextRef.current = ''; setLoading(true);
-    storage.saveCurrent({ ...session, persona, messages: newMsgs });
-    try {
-      const sp = buildRoleplayPrompt(session.scenario, session.difficulty, persona);
-      const res = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: newMsgs.map(m => ({ role: m.role, content: m.content })), systemPrompt: sp, mode: 'roleplay' }) });
-      const data = await res.json();
+    var userMsg = { role: 'user', content: text };
+    var newMsgs = messages.concat([userMsg]);
+    setMessages(newMsgs);
+    setInput('');
+    pendingTextRef.current = '';
+    setLoading(true);
+
+    var p = personaRef.current;
+    var sp = buildRoleplayPrompt(session.scenario, session.difficulty, p);
+    fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: newMsgs.map(function(m) { return { role: m.role, content: m.content }; }), systemPrompt: sp, mode: 'roleplay' }),
+    })
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
       if (data.text) {
-        const aiMsg = { role: 'assistant', content: data.text };
-        const updated = [...newMsgs, aiMsg];
+        var aiMsg = { role: 'assistant', content: data.text };
+        var updated = newMsgs.concat([aiMsg]);
         setMessages(updated);
-        storage.saveCurrent({ ...session, persona, messages: updated });
-        speakText(data.text, persona?.gender);
+        try { storage.saveCurrent({ scenario: session.scenario, difficulty: session.difficulty, persona: p, messages: updated, startedAt: session.startedAt }); } catch(e) {}
+        doSpeak(data.text, p ? p.gender : 'male');
       }
-    } catch (err) { console.error('Send error:', err); }
-    finally { setLoading(false); }
+      setLoading(false);
+    })
+    .catch(function() { setLoading(false); });
   }
 
-  async function endSession() {
-    if (ending) return; setEnding(true);
+  function doEnd() {
+    if (ending) return;
+    setEnding(true);
     setVoiceMode(false);
     if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }
     if (window.speechSynthesis) window.speechSynthesis.cancel();
     if (listening && recognitionRef.current) { recognitionRef.current.stop(); setListening(false); }
-    const sellerMsgs = messages.filter(m => m.role === 'user');
+    var sellerMsgs = messages.filter(function(m) { return m.role === 'user'; });
     if (sellerMsgs.length < 2) { alert('Need at least 2 responses.'); setEnding(false); return; }
-    try {
-      const sp = buildScorecardPrompt(session.scenario, session.difficulty, messages);
-      const res = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: [{ role: 'user', content: 'Generate the scorecard now.' }], systemPrompt: sp, mode: 'scorecard' }) });
-      const data = await res.json();
-      let scorecard;
-      try { let c = data.text.trim(); if (c.startsWith('`')) c = c.replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, ''); scorecard = JSON.parse(c); }
-      catch (e) { scorecard = { overallScore: 50, grade: 'C', dimensions: { empathy: { score: 50, summary: 'N/A' }, objectionHandling: { score: 50, summary: 'N/A' }, clarity: { score: 50, summary: 'N/A' }, closingTechnique: { score: 50, summary: 'N/A' }, activeListening: { score: 50, summary: 'N/A' } }, strengths: [], improvements: [] }; }
-      const done = { scenario: session.scenario, difficulty: session.difficulty, messages, scorecard, startedAt: session.startedAt, endedAt: Date.now() };
-      storage.saveSession(done); storage.saveCurrent({ ...done, scorecard });
+    var sp = buildScorecardPrompt(session.scenario, session.difficulty, messages);
+    fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'Generate the scorecard now.' }], systemPrompt: sp, mode: 'scorecard' }),
+    })
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+      var scorecard;
+      try {
+        var c = data.text.trim();
+        if (c.startsWith('`')) c = c.replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '');
+        scorecard = JSON.parse(c);
+      } catch(e) {
+        scorecard = { overallScore: 50, grade: 'C', dimensions: { empathy: { score: 50, summary: 'N/A' }, objectionHandling: { score: 50, summary: 'N/A' }, clarity: { score: 50, summary: 'N/A' }, closingTechnique: { score: 50, summary: 'N/A' }, activeListening: { score: 50, summary: 'N/A' } }, strengths: [], improvements: [] };
+      }
+      var done = { scenario: session.scenario, difficulty: session.difficulty, messages: messages, scorecard: scorecard, startedAt: session.startedAt, endedAt: Date.now() };
+      storage.saveSession(done);
+      storage.saveCurrent(Object.assign({}, done, { scorecard: scorecard }));
       router.push('/scorecard');
-    } catch (err) { console.error('End error:', err); setEnding(false); }
+    })
+    .catch(function() { setEnding(false); });
   }
 
-  function handleKeyDown(e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } }
+  function handleKeyDown(e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); } }
   if (!session) return null;
-  const turnCount = messages.filter(m => m.role === 'user').length;
+
+  var turnCount = messages.filter(function(m) { return m.role === 'user'; }).length;
+  var personaLabel = (persona && persona.name) ? (persona.name + ', ' + persona.title) : 'AI Buyer';
 
   return (
     <div className="container" style={{ paddingBottom: '16px' }}>
       <div className="chat-header">
-        <div>
-          <div className="chat-persona">🎭 {persona && persona.name ? `${persona.name}, ${persona.title}` : 'AI Buyer'}</div>
-        </div>
+        <div><div className="chat-persona">{personaLabel}</div></div>
         <div className="chat-meta">
           <span className="chat-turns">Turn {turnCount}</span>
           <span className={'chat-diff ' + session.difficulty}>{session.difficulty}</span>
-          <button onClick={() => { if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; } if (window.speechSynthesis) window.speechSynthesis.cancel(); setSpeaking(false); setVoiceEnabled(!voiceEnabled); }} style={{ background: voiceEnabled ? 'var(--gold)' : '#333', border: 'none', borderRadius: '8px', padding: '4px 8px', fontSize: '16px', cursor: 'pointer' }}>{voiceEnabled ? '🔊' : '🔇'}</button>
-          <button className="end-btn" onClick={endSession} disabled={ending}>{ending ? 'Scoring...' : 'End & Score'}</button>
+          <button onClick={function() { if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; } if (window.speechSynthesis) window.speechSynthesis.cancel(); setSpeaking(false); setVoiceEnabled(!voiceEnabled); }} style={{ background: voiceEnabled ? 'var(--gold)' : '#333', border: 'none', borderRadius: '8px', padding: '4px 8px', fontSize: '16px', cursor: 'pointer' }}>{voiceEnabled ? '🔊' : '🔇'}</button>
+          <button className="end-btn" onClick={doEnd} disabled={ending}>{ending ? 'Scoring...' : 'End & Score'}</button>
         </div>
       </div>
       <div className="msg system">{session.scenario}</div>
       <div className="chat-messages">
         {initializing && <div className="typing-indicator"><span></span><span></span><span></span></div>}
-        {messages.map((msg, i) => (
-          <div key={i} className={'msg ' + (msg.role === 'user' ? 'user' : 'ai')}>
-            {msg.content}
-            {msg.role === 'assistant' && voiceEnabled && <button onClick={(e) => { e.stopPropagation(); speakText(msg.content, persona?.gender); }} style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', fontSize: '14px', cursor: 'pointer', padding: '4px', marginTop: '4px', display: 'block' }}>🔊 Replay</button>}
-          </div>
-        ))}
+        {messages.map(function(msg, i) {
+          return (
+            <div key={i} className={'msg ' + (msg.role === 'user' ? 'user' : 'ai')}>
+              {msg.content}
+              {msg.role === 'assistant' && voiceEnabled && (
+                <button onClick={function() { doSpeak(msg.content, persona ? persona.gender : 'male'); }} style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', fontSize: '14px', cursor: 'pointer', padding: '4px', marginTop: '4px', display: 'block' }}>🔊 Replay</button>
+              )}
+            </div>
+          );
+        })}
         {loading && <div className="typing-indicator"><span></span><span></span><span></span></div>}
         {speaking && <div className="msg system" style={{ fontSize: '12px' }}>🔊 Speaking...</div>}
         {listening && <div className="msg system" style={{ fontSize: '12px', color: 'var(--red)' }}>🎤 Listening...</div>}
-        {ending && <div className="msg system">⚡ Generating scorecard...</div>}
+        {ending && <div className="msg system">Generating scorecard...</div>}
         <div ref={messagesEndRef} />
       </div>
       {!ending && (
-        <>
+        <div>
           <div style={{ textAlign: 'center', padding: '8px 0' }}>
-            <button onClick={toggleVoiceMode} style={{ width: voiceMode ? '80px' : '64px', height: voiceMode ? '80px' : '64px', borderRadius: '50%', border: voiceMode ? '3px solid var(--red)' : '3px solid var(--gold)', background: voiceMode ? '#ef444430' : 'var(--bg-input)', fontSize: voiceMode ? '32px' : '24px', cursor: 'pointer', transition: 'all 0.2s', animation: voiceMode ? 'pulse 1.5s infinite' : 'none' }} disabled={loading || initializing}>{voiceMode ? '🛑' : '🎙️'}</button>
+            <button onClick={function() { if (voiceMode) { setVoiceMode(false); doStopListening(); } else { setVoiceMode(true); setVoiceEnabled(true); doStartListening(true); } }} style={{ width: voiceMode ? '80px' : '64px', height: voiceMode ? '80px' : '64px', borderRadius: '50%', border: voiceMode ? '3px solid var(--red)' : '3px solid var(--gold)', background: voiceMode ? '#ef444430' : 'var(--bg-input)', fontSize: voiceMode ? '32px' : '24px', cursor: 'pointer' }} disabled={loading || initializing}>{voiceMode ? '🛑' : '🎙️'}</button>
             <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '4px' }}>{voiceMode ? 'Voice mode ON — speak freely' : 'Tap for hands-free voice mode'}</div>
           </div>
           <div className="chat-input-row">
-            <button onClick={() => { if (listening) stopListening(); else startListening(false); }} style={{ width: '48px', height: '48px', border: listening ? '2px solid var(--red)' : '2px solid #333', borderRadius: '14px', background: listening ? '#ef444430' : 'var(--bg-input)', color: listening ? 'var(--red)' : 'var(--text-muted)', fontSize: '20px', cursor: 'pointer', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }} disabled={loading || initializing}>🎤</button>
-            <textarea ref={inputRef} className="chat-input" placeholder={listening ? '🎤 Listening...' : 'Type or use voice mode...'} value={input} onChange={e => setInput(e.target.value)} onKeyDown={handleKeyDown} disabled={loading || initializing} rows={1} style={listening ? { borderColor: 'var(--red)', background: '#ef444410' } : {}} />
-            <button id="auto-send-btn" className="send-btn" onClick={sendMessage} disabled={!input.trim() || loading || initializing}>↑</button>
+            <button onClick={function() { if (listening) doStopListening(); else doStartListening(false); }} style={{ width: '48px', height: '48px', border: listening ? '2px solid var(--red)' : '2px solid #333', borderRadius: '14px', background: listening ? '#ef444430' : 'var(--bg-input)', color: listening ? 'var(--red)' : 'var(--text-muted)', fontSize: '20px', cursor: 'pointer', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }} disabled={loading || initializing}>🎤</button>
+            <textarea ref={inputRef} className="chat-input" placeholder={listening ? '🎤 Listening...' : 'Type or use voice mode...'} value={input} onChange={function(e) { setInput(e.target.value); }} onKeyDown={handleKeyDown} disabled={loading || initializing} rows={1} style={listening ? { borderColor: 'var(--red)', background: '#ef444410' } : {}} />
+            <button id="auto-send-btn" className="send-btn" onClick={doSend} disabled={!input.trim() || loading || initializing}>↑</button>
           </div>
-        </>
+        </div>
       )}
-      <style jsx>{`@keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.7; transform: scale(1.05); } }`}</style>
     </div>
   );
 }
