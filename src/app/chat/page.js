@@ -225,7 +225,7 @@ export default function ChatPage() {
     <div className="container" style={{ paddingBottom: '16px' }}>
       <div className="chat-header">
         <div>
-          <div className="chat-persona">🎭 {persona ? `${persona.name}, ${persona.title}` : 'AI Buyer'}</div>
+          <div className="chat-persona">🎭 {persona && persona.name ? `${persona.name}, ${persona.title}` : 'AI Buyer'}</div>
         </div>
         <div className="chat-meta">
           <span className="chat-turns">Turn {turnCount}</span>
