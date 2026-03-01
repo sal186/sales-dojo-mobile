@@ -15,131 +15,104 @@ export default function ChatPage() {
   const [listening, setListening] = useState(false);
   const [speaking, setSpeaking] = useState(false);
   const [voiceEnabled, setVoiceEnabled] = useState(true);
-  const [selectedVoice, setSelectedVoice] = useState(null);
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
   const recognitionRef = useRef(null);
+  const audioRef = useRef(null);
+  const transcriptRef = useRef('');
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
 
-  useEffect(() => {
-    scrollToBottom();
-  }, [messages, loading]);
+  useEffect(() => { scrollToBottom(); }, [messages, loading]);
 
-  // Find the best available voice
-  useEffect(() => {
-    if (typeof window === 'undefined' || !window.speechSynthesis) return;
-
-    function pickBestVoice() {
-      const voices = window.speechSynthesis.getVoices();
-      if (voices.length === 0) return;
-
-      // Priority list: most natural-sounding voices first
-      const preferred = [
-        // macOS premium voices
-        'Evan', 'Ava', 'Zoe', 'Samantha', 'Tom', 'Daniel',
-        // Google voices (Chrome)
-        'Google US English', 'Google UK English Male', 'Google UK English Female',
-        // Microsoft voices (Edge)
-        'Microsoft Mark', 'Microsoft David', 'Microsoft Zira',
-        // iOS
-        'Aaron', 'Nicky', 'Moira',
-      ];
-
-      for (const name of preferred) {
-        const match = voices.find(v => v.name.includes(name));
-        if (match) {
-          setSelectedVoice(match);
-          return;
-        }
-      }
-
-      // Fallback: any English voice
-      const english = voices.find(v => v.lang.startsWith('en'));
-      if (english) setSelectedVoice(english);
-    }
-
-    pickBestVoice();
-    window.speechSynthesis.onvoiceschanged = pickBestVoice;
-  }, []);
-
-  // Initialize speech recognition
   useEffect(() => {
     if (typeof window !== 'undefined') {
-      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-      if (SpeechRecognition) {
-        const recognition = new SpeechRecognition();
-        recognition.continuous = false;
+      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (SR) {
+        const recognition = new SR();
+        recognition.continuous = true;
         recognition.interimResults = true;
         recognition.lang = 'en-US';
-
         recognition.onresult = (event) => {
-          let transcript = '';
-          for (let i = event.resultIndex; i < event.results.length; i++) {
-            transcript += event.results[i][0].transcript;
+          let final = '';
+          let interim = '';
+          for (let i = 0; i < event.results.length; i++) {
+            if (event.results[i].isFinal) {
+              final += event.results[i][0].transcript + ' ';
+            } else {
+              interim += event.results[i][0].transcript;
+            }
           }
-          setInput(transcript);
+          transcriptRef.current = final;
+          setInput((final + interim).trim());
         };
-
         recognition.onend = () => {
           setListening(false);
         };
-
         recognition.onerror = (event) => {
-          console.error('Speech recognition error:', event.error);
+          console.error('Speech error:', event.error);
           setListening(false);
         };
-
         recognitionRef.current = recognition;
       }
     }
   }, []);
 
-  // Text-to-speech function with best voice
-  const speakText = useCallback((text) => {
+  const speakText = useCallback(async (text) => {
     if (!voiceEnabled) return;
-    if (typeof window === 'undefined' || !window.speechSynthesis) return;
+    if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }
+    setSpeaking(true);
+    try {
+      const res = await fetch('/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.audioContent) {
+          const audio = new Audio('data:audio/mp3;base64,' + data.audioContent);
+          audioRef.current = audio;
+          audio.onended = () => { setSpeaking(false); audioRef.current = null; };
+          audio.onerror = () => { setSpeaking(false); audioRef.current = null; };
+          await audio.play();
+          return;
+        }
+      }
+    } catch (err) { console.error('TTS error:', err); }
+    if (window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(text);
+      u.rate = 1.05;
+      u.pitch = 0.9;
+      const voices = window.speechSynthesis.getVoices();
+      const pick = voices.find(v => v.name.includes('Daniel')) || voices.find(v => v.name.includes('Google US English')) || voices.find(v => v.lang.startsWith('en'));
+      if (pick) u.voice = pick;
+      u.onend = () => setSpeaking(false);
+      u.onerror = () => setSpeaking(false);
+      window.speechSynthesis.speak(u);
+    } else { setSpeaking(false); }
+  }, [voiceEnabled]);
 
-    window.speechSynthesis.cancel();
-
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.rate = 0.95;
-    utterance.pitch = 1.05;
-    utterance.volume = 1.0;
-
-    if (selectedVoice) {
-      utterance.voice = selectedVoice;
+  useEffect(() => {
+    if (typeof window !== 'undefined' && window.speechSynthesis) {
+      window.speechSynthesis.getVoices();
+      window.speechSynthesis.onvoiceschanged = () => window.speechSynthesis.getVoices();
     }
+  }, []);
 
-    utterance.onstart = () => setSpeaking(true);
-    utterance.onend = () => setSpeaking(false);
-    utterance.onerror = () => setSpeaking(false);
-
-    window.speechSynthesis.speak(utterance);
-  }, [voiceEnabled, selectedVoice]);
-
-  // Load session and get first AI message
   useEffect(() => {
     const current = storage.getCurrent();
-    if (!current) {
-      router.push('/');
-      return;
-    }
+    if (!current) { router.push('/'); return; }
     setSession(current);
-
     async function getOpening() {
       try {
-        const systemPrompt = buildRoleplayPrompt(current.scenario, current.difficulty);
+        const sp = buildRoleplayPrompt(current.scenario, current.difficulty);
         const res = await fetch('/api/chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            messages: [{ role: 'user', content: 'Begin the roleplay. Give your opening line as the buyer.' }],
-            systemPrompt,
-            mode: 'roleplay',
-          }),
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messages: [{ role: 'user', content: 'Begin the roleplay. Give your opening line as the buyer.' }], systemPrompt: sp, mode: 'roleplay' }),
         });
         const data = await res.json();
         if (data.text) {
@@ -148,33 +121,23 @@ export default function ChatPage() {
           storage.saveCurrent({ ...current, messages: [aiMsg] });
           setTimeout(() => speakText(data.text), 500);
         }
-      } catch (err) {
-        console.error('Failed to get opening:', err);
-      } finally {
-        setInitializing(false);
-      }
+      } catch (err) { console.error('Opening error:', err); }
+      finally { setInitializing(false); }
     }
-
-    if (current.messages && current.messages.length > 0) {
-      setMessages(current.messages);
-      setInitializing(false);
-    } else {
-      getOpening();
-    }
+    if (current.messages && current.messages.length > 0) { setMessages(current.messages); setInitializing(false); }
+    else { getOpening(); }
   }, [router, speakText]);
 
   function toggleListening() {
-    if (!recognitionRef.current) {
-      alert('Speech recognition is not supported in your browser. Try Chrome or Safari.');
-      return;
-    }
-
+    if (!recognitionRef.current) { alert('Speech recognition not supported. Try Chrome.'); return; }
     if (listening) {
       recognitionRef.current.stop();
       setListening(false);
     } else {
+      if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }
       if (window.speechSynthesis) window.speechSynthesis.cancel();
       setSpeaking(false);
+      transcriptRef.current = '';
       setInput('');
       recognitionRef.current.start();
       setListening(true);
@@ -182,302 +145,105 @@ export default function ChatPage() {
   }
 
   async function sendMessage() {
-    const messageText = input.trim();
-    if (!messageText || loading || !session) return;
-
-    if (listening && recognitionRef.current) {
-      recognitionRef.current.stop();
-      setListening(false);
-    }
-
-    const userMsg = { role: 'user', content: messageText };
-    const newMessages = [...messages, userMsg];
-    setMessages(newMessages);
+    const text = input.trim();
+    if (!text || loading || !session) return;
+    if (listening && recognitionRef.current) { recognitionRef.current.stop(); setListening(false); }
+    const userMsg = { role: 'user', content: text };
+    const newMsgs = [...messages, userMsg];
+    setMessages(newMsgs);
     setInput('');
     setLoading(true);
-
-    storage.saveCurrent({ ...session, messages: newMessages });
-
+    storage.saveCurrent({ ...session, messages: newMsgs });
     try {
-      const systemPrompt = buildRoleplayPrompt(session.scenario, session.difficulty);
-      const apiMessages = newMessages.map(m => ({
-        role: m.role,
-        content: m.content,
-      }));
-
+      const sp = buildRoleplayPrompt(session.scenario, session.difficulty);
       const res = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          messages: apiMessages,
-          systemPrompt,
-          mode: 'roleplay',
-        }),
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: newMsgs.map(m => ({ role: m.role, content: m.content })), systemPrompt: sp, mode: 'roleplay' }),
       });
-
       const data = await res.json();
       if (data.text) {
         const aiMsg = { role: 'assistant', content: data.text };
-        const updatedMessages = [...newMessages, aiMsg];
-        setMessages(updatedMessages);
-        storage.saveCurrent({ ...session, messages: updatedMessages });
+        const updated = [...newMsgs, aiMsg];
+        setMessages(updated);
+        storage.saveCurrent({ ...session, messages: updated });
         speakText(data.text);
       }
-    } catch (err) {
-      console.error('Send error:', err);
-    } finally {
-      setLoading(false);
-      inputRef.current?.focus();
-    }
+    } catch (err) { console.error('Send error:', err); }
+    finally { setLoading(false); inputRef.current?.focus(); }
   }
 
   async function endSession() {
     if (ending) return;
     setEnding(true);
-
+    if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }
     if (window.speechSynthesis) window.speechSynthesis.cancel();
-
-    const sellerMessages = messages.filter(m => m.role === 'user');
-    if (sellerMessages.length < 2) {
-      alert('Keep going — you need at least 2 responses for a scorecard.');
-      setEnding(false);
-      return;
-    }
-
+    const sellerMsgs = messages.filter(m => m.role === 'user');
+    if (sellerMsgs.length < 2) { alert('Need at least 2 responses for a scorecard.'); setEnding(false); return; }
     try {
-      const systemPrompt = buildScorecardPrompt(session.scenario, session.difficulty, messages);
+      const sp = buildScorecardPrompt(session.scenario, session.difficulty, messages);
       const res = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          messages: [{ role: 'user', content: 'Generate the scorecard now.' }],
-          systemPrompt,
-          mode: 'scorecard',
-        }),
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: [{ role: 'user', content: 'Generate the scorecard now.' }], systemPrompt: sp, mode: 'scorecard' }),
       });
-
       const data = await res.json();
       let scorecard;
-
       try {
-        let cleaned = data.text.trim();
-        // Remove markdown code fences if present
-        if (cleaned.startsWith('```')) {
-          cleaned = cleaned.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?\s*```$/, '');
-        }
-        // Remove any leading/trailing whitespace
-        cleaned = cleaned.trim();
-        scorecard = JSON.parse(cleaned);
-      } catch (parseErr) {
-        console.error('Scorecard parse error:', parseErr, 'Raw:', data.text);
-        // Try to extract JSON from response
-        try {
-          const jsonMatch = data.text.match(/\{[\s\S]*\}/);
-          if (jsonMatch) {
-            scorecard = JSON.parse(jsonMatch[0]);
-          }
-        } catch (e) {
-          // Final fallback
-        }
-
-        if (!scorecard) {
-          scorecard = {
-            overallScore: 50,
-            grade: 'C',
-            dimensions: {
-              empathy: { score: 50, summary: 'Session too short for detailed analysis.' },
-              objectionHandling: { score: 50, summary: 'Session too short for detailed analysis.' },
-              clarity: { score: 50, summary: 'Session too short for detailed analysis.' },
-              closingTechnique: { score: 50, summary: 'Session too short for detailed analysis.' },
-              activeListening: { score: 50, summary: 'Session too short for detailed analysis.' },
-            },
-            strengths: [{ quote: 'N/A', analysis: 'Have a longer conversation for better analysis.' }],
-            improvements: [{ quote: 'N/A', analysis: 'Have a longer conversation for better feedback.', rewrite: 'Try at least 5-6 exchanges for a meaningful scorecard.' }],
-          };
-        }
+        let c = data.text.trim();
+        if (c.startsWith('```')) c = c.replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '');
+        scorecard = JSON.parse(c);
+      } catch (e) {
+        scorecard = { overallScore: 50, grade: 'C', dimensions: { empathy: { score: 50, summary: 'N/A' }, objectionHandling: { score: 50, summary: 'N/A' }, clarity: { score: 50, summary: 'N/A' }, closingTechnique: { score: 50, summary: 'N/A' }, activeListening: { score: 50, summary: 'N/A' } }, strengths: [], improvements: [] };
       }
-
-      const completedSession = {
-        scenario: session.scenario,
-        difficulty: session.difficulty,
-        messages,
-        scorecard,
-        startedAt: session.startedAt,
-        endedAt: Date.now(),
-      };
-
-      storage.saveSession(completedSession);
-      storage.saveCurrent({ ...completedSession, scorecard });
-
+      const done = { scenario: session.scenario, difficulty: session.difficulty, messages, scorecard, startedAt: session.startedAt, endedAt: Date.now() };
+      storage.saveSession(done);
+      storage.saveCurrent({ ...done, scorecard });
       router.push('/scorecard');
-    } catch (err) {
-      console.error('End session error:', err);
-      setEnding(false);
-    }
+    } catch (err) { console.error('End error:', err); setEnding(false); }
   }
 
-  function handleKeyDown(e) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      sendMessage();
-    }
-  }
+  function handleKeyDown(e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } }
 
   if (!session) return null;
-
   const turnCount = messages.filter(m => m.role === 'user').length;
 
   return (
     <div className="container" style={{ paddingBottom: '16px' }}>
       <div className="chat-header">
-        <div>
-          <div className="chat-persona">🎭 AI Buyer</div>
-        </div>
+        <div><div className="chat-persona">🎭 AI Buyer</div></div>
         <div className="chat-meta">
           <span className="chat-turns">Turn {turnCount}</span>
-          <span className={`chat-diff ${session.difficulty}`}>
-            {session.difficulty}
-          </span>
-          <button
-            onClick={() => {
-              if (window.speechSynthesis) window.speechSynthesis.cancel();
-              setSpeaking(false);
-              setVoiceEnabled(!voiceEnabled);
-            }}
-            style={{
-              background: voiceEnabled ? 'var(--gold)' : '#333',
-              border: 'none',
-              borderRadius: '8px',
-              padding: '4px 8px',
-              fontSize: '16px',
-              cursor: 'pointer',
-              transition: 'all 0.15s',
-            }}
-            title={voiceEnabled ? 'Mute voice' : 'Enable voice'}
-          >
-            {voiceEnabled ? '🔊' : '🔇'}
-          </button>
-          <button className="end-btn" onClick={endSession} disabled={ending}>
-            {ending ? 'Scoring...' : 'End & Score'}
-          </button>
+          <span className={'chat-diff ' + session.difficulty}>{session.difficulty}</span>
+          <button onClick={() => { if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; } if (window.speechSynthesis) window.speechSynthesis.cancel(); setSpeaking(false); setVoiceEnabled(!voiceEnabled); }} style={{ background: voiceEnabled ? 'var(--gold)' : '#333', border: 'none', borderRadius: '8px', padding: '4px 8px', fontSize: '16px', cursor: 'pointer' }} title={voiceEnabled ? 'Mute' : 'Unmute'}>{voiceEnabled ? '🔊' : '🔇'}</button>
+          <button className="end-btn" onClick={endSession} disabled={ending}>{ending ? 'Scoring...' : 'End & Score'}</button>
         </div>
       </div>
 
-      <div className="msg system">
-        {session.scenario}
-      </div>
+      <div className="msg system">{session.scenario}</div>
 
       <div className="chat-messages">
-        {initializing && (
-          <div className="typing-indicator">
-            <span></span><span></span><span></span>
-          </div>
-        )}
-
+        {initializing && <div className="typing-indicator"><span></span><span></span><span></span></div>}
         {messages.map((msg, i) => (
-          <div key={i} className={`msg ${msg.role === 'user' ? 'user' : 'ai'}`}>
+          <div key={i} className={'msg ' + (msg.role === 'user' ? 'user' : 'ai')}>
             {msg.content}
             {msg.role === 'assistant' && voiceEnabled && (
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  speakText(msg.content);
-                }}
-                style={{
-                  background: 'transparent',
-                  border: 'none',
-                  color: 'var(--text-muted)',
-                  fontSize: '14px',
-                  cursor: 'pointer',
-                  padding: '4px',
-                  marginTop: '4px',
-                  display: 'block',
-                }}
-              >
-                🔊 Replay
-              </button>
+              <button onClick={(e) => { e.stopPropagation(); speakText(msg.content); }} style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', fontSize: '14px', cursor: 'pointer', padding: '4px', marginTop: '4px', display: 'block' }}>🔊 Replay</button>
             )}
           </div>
         ))}
-
-        {loading && (
-          <div className="typing-indicator">
-            <span></span><span></span><span></span>
-          </div>
-        )}
-
-        {speaking && (
-          <div className="msg system" style={{ fontSize: '12px' }}>
-            🔊 AI buyer is speaking...
-          </div>
-        )}
-
-        {ending && (
-          <div className="msg system">
-            ⚡ Generating your scorecard...
-          </div>
-        )}
-
+        {loading && <div className="typing-indicator"><span></span><span></span><span></span></div>}
+        {speaking && <div className="msg system" style={{ fontSize: '12px' }}>🔊 Speaking...</div>}
+        {ending && <div className="msg system">⚡ Generating scorecard...</div>}
         <div ref={messagesEndRef} />
       </div>
 
       {!ending && (
         <div className="chat-input-row">
-          <button
-            onClick={toggleListening}
-            style={{
-              width: '48px',
-              height: '48px',
-              border: listening ? '2px solid var(--red)' : '2px solid #333',
-              borderRadius: '14px',
-              background: listening ? '#ef444430' : 'var(--bg-input)',
-              color: listening ? 'var(--red)' : 'var(--text-muted)',
-              fontSize: '20px',
-              cursor: 'pointer',
-              flexShrink: 0,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              transition: 'all 0.15s',
-            }}
-            disabled={loading || initializing}
-            title={listening ? 'Stop listening' : 'Speak your response'}
-          >
-            🎤
-          </button>
-
-          <textarea
-            ref={inputRef}
-            className="chat-input"
-            placeholder={listening ? '🎤 Listening...' : 'Type or tap mic to speak...'}
-            value={input}
-            onChange={e => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            disabled={loading || initializing}
-            rows={1}
-            style={listening ? { borderColor: 'var(--red)', background: '#ef444410' } : {}}
-          />
-          <button
-            className="send-btn"
-            onClick={sendMessage}
-            disabled={!input.trim() || loading || initializing}
-          >
-            ↑
-          </button>
+          <button onClick={toggleListening} style={{ width: '48px', height: '48px', border: listening ? '2px solid var(--red)' : '2px solid #333', borderRadius: '14px', background: listening ? '#ef444430' : 'var(--bg-input)', color: listening ? 'var(--red)' : 'var(--text-muted)', fontSize: '20px', cursor: 'pointer', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }} disabled={loading || initializing} title={listening ? 'Stop' : 'Speak'}>🎤</button>
+          <textarea ref={inputRef} className="chat-input" placeholder={listening ? '🎤 Listening... tap mic when done' : 'Type or tap mic...'} value={input} onChange={e => setInput(e.target.value)} onKeyDown={handleKeyDown} disabled={loading || initializing} rows={1} style={listening ? { borderColor: 'var(--red)', background: '#ef444410' } : {}} />
+          <button className="send-btn" onClick={sendMessage} disabled={!input.trim() || loading || initializing}>↑</button>
         </div>
       )}
-
-      {listening && (
-        <div style={{
-          textAlign: 'center',
-          color: 'var(--red)',
-          fontSize: '13px',
-          fontWeight: '600',
-          padding: '4px 0',
-        }}>
-          🎤 Listening... tap mic to stop, then send
-        </div>
-      )}
+      {listening && <div style={{ textAlign: 'center', color: 'var(--red)', fontSize: '13px', fontWeight: '600', padding: '4px 0' }}>🎤 Listening... tap mic when done, then tap send</div>}
     </div>
   );
 }
