@@ -1,9 +1,3 @@
-// ============================================
-// GEMINI API PROXY
-// Keeps API key server-side on Vercel.
-// ~1-2 cents per full roleplay session with Flash.
-// ============================================
-
 export async function POST(request) {
   try {
     const { messages, systemPrompt, mode } = await request.json();
@@ -13,30 +7,40 @@ export async function POST(request) {
       return Response.json({ error: 'API key not configured' }, { status: 500 });
     }
 
-    // flash-lite for roleplay (cheap + fast), flash for scorecards (smarter)
-    const model = mode === 'scorecard'
-      ? 'gemini-1.5-flash'
-      : 'gemini-1.5-flash';
+    const model = 'gemini-1.5-flash';
 
+    // Map roles: Gemini uses "model" not "assistant"
     const geminiMessages = messages.map(m => ({
-      role: m.role === 'user' ? 'user' : 'model',
+      role: m.role === 'assistant' ? 'model' : 'user',
       parts: [{ text: m.content }],
     }));
 
+    // Add system instruction as first user message if not already there
+    if (systemPrompt) {
+      geminiMessages.unshift({
+        role: 'user',
+        parts: [{ text: systemPrompt }],
+      });
+      // Need a model response after system prompt if next is also user
+      if (geminiMessages.length > 1 && geminiMessages[1].role === 'user') {
+        geminiMessages.splice(1, 0, {
+          role: 'model',
+          parts: [{ text: 'Understood. I will follow these instructions.' }],
+        });
+      }
+    }
+
     const body = {
       contents: geminiMessages,
-      systemInstruction: {
-        parts: [{ text: systemPrompt }],
-      },
       generationConfig: {
-        temperature: mode === 'scorecard' ? 0.3 : 0.85,
+        temperature: mode === 'scorecard' ? 0.3 : 0.8,
         maxOutputTokens: mode === 'scorecard' ? 2048 : 256,
         topP: 0.9,
       },
     };
 
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1/models/${model}:generateContent?key=${GEMINI_API_KEY}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
