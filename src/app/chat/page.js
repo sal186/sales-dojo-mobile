@@ -126,8 +126,8 @@ export default function ChatPage() {
     setSession(current);
 
     // Pick or restore persona
-    let p = current.persona;
-    if (!p) { p = getRandomPersona(); storage.saveCurrent({ ...current, persona: p }); }
+    let p = current.persona || null;
+    if (!p || !p.name) { p = getRandomPersona(); storage.saveCurrent({ ...current, persona: p }); }
     setPersona(p);
 
     async function getOpening() {
