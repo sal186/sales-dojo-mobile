@@ -1,0 +1,9 @@
+{
+  "appId": "com.salesdojo.app",
+  "appName": "Sales Dojo",
+  "webDir": "out",
+  "server": {
+    "url": "https://sales-dojo-mobile.vercel.app",
+    "cleartext": true
+  }
+}
