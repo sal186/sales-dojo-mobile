@@ -26,49 +26,142 @@ export default function ChatPage() {
   const autoSendRef = useRef(false);
   const voiceModeRef = useRef(false);
   const personaRef = useRef(null);
+  const isIOSRef = useRef(false);
+  const shouldRestartRef = useRef(false);
+  const listeningRef = useRef(false);
 
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, loading]);
   useEffect(() => { voiceModeRef.current = voiceMode; }, [voiceMode]);
   useEffect(() => { personaRef.current = persona; }, [persona]);
 
-  // Speech recognition
+  // Detect iOS
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      var ua = window.navigator.userAgent;
+      isIOSRef.current = /iPad|iPhone|iPod/.test(ua) || (ua.includes('Mac') && 'ontouchend' in document);
+    }
+  }, []);
+
+  // Speech recognition — iOS-safe version
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) return;
-    const r = new SR();
-    r.continuous = true;
-    r.interimResults = true;
-    r.lang = 'en-US';
-    r.onresult = function(event) {
-      var f = '', interim = '';
-      for (var i = 0; i < event.results.length; i++) {
-        if (event.results[i].isFinal) f += event.results[i][0].transcript + ' ';
-        else interim += event.results[i][0].transcript;
-      }
-      var full = (f + interim).trim();
-      pendingTextRef.current = full;
-      setInput(full);
-      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-      if (autoSendRef.current && f.trim().length > 0) {
-        silenceTimerRef.current = setTimeout(function() {
-          if (pendingTextRef.current.trim()) r.stop();
-        }, 2000);
-      }
-    };
-    r.onend = function() {
-      setListening(false);
-      if (autoSendRef.current && pendingTextRef.current.trim()) {
-        autoSendRef.current = false;
-        setTimeout(function() {
-          var btn = document.getElementById('auto-send-btn');
-          if (btn) btn.click();
-        }, 100);
-      }
-    };
-    r.onerror = function() { setListening(false); };
-    recognitionRef.current = r;
+
+    function createRecognition() {
+      var r = new SR();
+      // iOS WKWebView: continuous mode is broken — use single-shot and restart
+      r.continuous = !isIOSRef.current;
+      r.interimResults = true;
+      r.lang = 'en-US';
+      r.maxAlternatives = 1;
+
+      r.onresult = function(event) {
+        var f = '', interim = '';
+        for (var i = 0; i < event.results.length; i++) {
+          if (event.results[i].isFinal) f += event.results[i][0].transcript + ' ';
+          else interim += event.results[i][0].transcript;
+        }
+        var full = (f + interim).trim();
+        pendingTextRef.current = full;
+        setInput(full);
+        if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+        if (autoSendRef.current && f.trim().length > 0) {
+          // Longer silence timer on iOS (3s vs 2s) for reliability
+          var delay = isIOSRef.current ? 3000 : 2000;
+          silenceTimerRef.current = setTimeout(function() {
+            if (pendingTextRef.current.trim()) {
+              shouldRestartRef.current = false;
+              try { r.stop(); } catch(e) {}
+            }
+          }, delay);
+        }
+      };
+
+      r.onend = function() {
+        listeningRef.current = false;
+        setListening(false);
+
+        // If we have pending text and auto-send is on, send it
+        if (autoSendRef.current && pendingTextRef.current.trim()) {
+          autoSendRef.current = false;
+          shouldRestartRef.current = false;
+          setTimeout(function() {
+            var btn = document.getElementById('auto-send-btn');
+            if (btn) btn.click();
+          }, 100);
+          return;
+        }
+
+        // iOS: auto-restart if voice mode is still active and we should keep listening
+        if (shouldRestartRef.current && voiceModeRef.current) {
+          setTimeout(function() {
+            if (voiceModeRef.current && !listeningRef.current) {
+              doStartListeningInternal(true);
+            }
+          }, 300);
+        }
+      };
+
+      r.onerror = function(event) {
+        listeningRef.current = false;
+        setListening(false);
+        // On iOS, "no-speech" and "aborted" errors are common — restart if in voice mode
+        if (event.error === 'no-speech' || event.error === 'aborted' || event.error === 'network') {
+          if (voiceModeRef.current && shouldRestartRef.current) {
+            setTimeout(function() {
+              if (voiceModeRef.current && !listeningRef.current) {
+                doStartListeningInternal(true);
+              }
+            }, 500);
+          }
+        }
+      };
+
+      return r;
+    }
+
+    recognitionRef.current = createRecognition();
+
+    // On iOS, recreate recognition instance before each start for reliability
+    recognitionRef.current._create = createRecognition;
   }, []);
+
+  function doStartListeningInternal(auto) {
+    if (loading || initializing) return;
+    if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }
+    if (typeof window !== 'undefined' && window.speechSynthesis) window.speechSynthesis.cancel();
+    setSpeaking(false);
+    pendingTextRef.current = '';
+    setInput('');
+    autoSendRef.current = !!auto;
+    shouldRestartRef.current = !!auto;
+
+    // iOS: recreate recognition instance each time to avoid stale state
+    if (isIOSRef.current && recognitionRef.current && recognitionRef.current._create) {
+      var newR = recognitionRef.current._create();
+      newR._create = recognitionRef.current._create;
+      recognitionRef.current = newR;
+    }
+
+    try {
+      recognitionRef.current.start();
+      listeningRef.current = true;
+      setListening(true);
+    } catch(e) {
+      // If already started, stop and retry
+      try {
+        recognitionRef.current.stop();
+        setTimeout(function() {
+          try {
+            recognitionRef.current.start();
+            listeningRef.current = true;
+            setListening(true);
+          } catch(e2) {}
+        }, 300);
+      } catch(e2) {}
+    }
+  }
 
   // Voices
   useEffect(() => {
@@ -97,11 +190,14 @@ export default function ChatPage() {
           setSpeaking(false);
           audioRef.current = null;
           if (voiceModeRef.current && recognitionRef.current) {
-            setTimeout(function() { doStartListening(true); }, 300);
+            setTimeout(function() { doStartListeningInternal(true); }, 500);
           }
         };
         audio.onerror = function() { setSpeaking(false); audioRef.current = null; };
-        audio.play();
+        audio.play().catch(function() {
+          // iOS autoplay blocked — fall back to browser TTS
+          doFallbackSpeak(text, gender);
+        });
       } else {
         doFallbackSpeak(text, gender);
       }
@@ -126,7 +222,7 @@ export default function ChatPage() {
     u.onend = function() {
       setSpeaking(false);
       if (voiceModeRef.current && recognitionRef.current) {
-        setTimeout(function() { doStartListening(true); }, 300);
+        setTimeout(function() { doStartListeningInternal(true); }, 500);
       }
     };
     u.onerror = function() { setSpeaking(false); };
@@ -134,20 +230,16 @@ export default function ChatPage() {
   }
 
   function doStartListening(auto) {
-    if (!recognitionRef.current || loading || initializing) return;
-    if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }
-    if (window.speechSynthesis) window.speechSynthesis.cancel();
-    setSpeaking(false);
-    pendingTextRef.current = '';
-    setInput('');
-    autoSendRef.current = !!auto;
-    try { recognitionRef.current.start(); setListening(true); } catch(e) {}
+    doStartListeningInternal(auto);
   }
 
   function doStopListening() {
-    if (recognitionRef.current && listening) {
-      autoSendRef.current = false;
-      recognitionRef.current.stop();
+    shouldRestartRef.current = false;
+    autoSendRef.current = false;
+    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+    if (recognitionRef.current && listeningRef.current) {
+      try { recognitionRef.current.stop(); } catch(e) {}
+      listeningRef.current = false;
       setListening(false);
     }
   }
@@ -191,7 +283,8 @@ export default function ChatPage() {
   function doSend() {
     var text = input.trim();
     if (!text || loading || !session) return;
-    if (listening && recognitionRef.current) { recognitionRef.current.stop(); setListening(false); }
+    shouldRestartRef.current = false;
+    if (listening && recognitionRef.current) { try { recognitionRef.current.stop(); } catch(e) {} listeningRef.current = false; setListening(false); }
     if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
     var userMsg = { role: 'user', content: text };
     var newMsgs = messages.concat([userMsg]);
@@ -225,9 +318,10 @@ export default function ChatPage() {
     if (ending) return;
     setEnding(true);
     setVoiceMode(false);
+    shouldRestartRef.current = false;
     if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }
-    if (window.speechSynthesis) window.speechSynthesis.cancel();
-    if (listening && recognitionRef.current) { recognitionRef.current.stop(); setListening(false); }
+    if (typeof window !== 'undefined' && window.speechSynthesis) window.speechSynthesis.cancel();
+    if (listening && recognitionRef.current) { try { recognitionRef.current.stop(); } catch(e) {} listeningRef.current = false; setListening(false); }
     var sellerMsgs = messages.filter(function(m) { return m.role === 'user'; });
     if (sellerMsgs.length < 2) { alert('Need at least 2 responses.'); setEnding(false); return; }
     var sp = buildScorecardPrompt(session.scenario, session.difficulty, messages);
@@ -267,7 +361,7 @@ export default function ChatPage() {
         <div className="chat-meta">
           <span className="chat-turns">Turn {turnCount}</span>
           <span className={'chat-diff ' + session.difficulty}>{session.difficulty}</span>
-          <button onClick={function() { if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; } if (window.speechSynthesis) window.speechSynthesis.cancel(); setSpeaking(false); setVoiceEnabled(!voiceEnabled); }} style={{ background: voiceEnabled ? 'var(--gold)' : '#333', border: 'none', borderRadius: '8px', padding: '4px 8px', fontSize: '16px', cursor: 'pointer' }}>{voiceEnabled ? '🔊' : '🔇'}</button>
+          <button onClick={function() { if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; } if (typeof window !== 'undefined' && window.speechSynthesis) window.speechSynthesis.cancel(); setSpeaking(false); setVoiceEnabled(!voiceEnabled); }} style={{ background: voiceEnabled ? 'var(--gold)' : '#333', border: 'none', borderRadius: '8px', padding: '4px 8px', fontSize: '16px', cursor: 'pointer' }}>{voiceEnabled ? '🔊' : '🔇'}</button>
           <button className="end-btn" onClick={doEnd} disabled={ending}>{ending ? 'Scoring...' : 'End & Score'}</button>
         </div>
       </div>
