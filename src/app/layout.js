@@ -1,22 +1,12 @@
 import './globals.css';
+import ErrorBoundary from '@/components/ErrorBoundary';
 
 export const metadata = {
-  title: 'Sales Dojo — AI Sales Training',
-  description: 'Practice your pitch against AI buyers. Get instant coaching and scorecard feedback.',
-  themeColor: '#0a0a0a',
+  title: 'Sales Dojo',
+  description: 'AI-powered sales roleplay training',
   manifest: '/manifest.json',
-  appleWebApp: {
-    capable: true,
-    statusBarStyle: 'black-translucent',
-    title: 'Sales Dojo',
-  },
-};
-
-export const viewport = {
-  width: 'device-width',
-  initialScale: 1,
-  maximumScale: 1,
-  viewportFit: 'cover',
+  themeColor: '#111111',
+  viewport: { width: 'device-width', initialScale: 1, maximumScale: 1, userScalable: false, viewportFit: 'cover' },
 };
 
 export default function RootLayout({ children }) {
@@ -24,9 +14,14 @@ export default function RootLayout({ children }) {
     <html lang="en">
       <head>
         <meta name="apple-mobile-web-app-capable" content="yes" />
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
         <link rel="apple-touch-icon" href="/icon-192.png" />
       </head>
-      <body>{children}</body>
+      <body>
+        <ErrorBoundary>
+          {children}
+        </ErrorBoundary>
+      </body>
     </html>
   );
 }
