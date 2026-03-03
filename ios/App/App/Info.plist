@@ -5,7 +5,13 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
-        <string>Sales Dojo</string>
+	<string>Sales Dojo</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Sales Dojo needs microphone access for voice roleplay sessions</string>
+	<key>LSApplicationCategoryType</key>
+	<string></string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Sales Dojo uses speech recognition for voice conversations</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>

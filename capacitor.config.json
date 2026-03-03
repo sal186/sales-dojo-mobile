@@ -4,6 +4,6 @@
   "webDir": "out",
   "server": {
     "url": "https://sales-dojo-mobile.vercel.app",
-    "cleartext": true
+    "cleartext": false
   }
 }
