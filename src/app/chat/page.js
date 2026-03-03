@@ -26,106 +26,150 @@ export default function ChatPage() {
   const autoSendRef = useRef(false);
   const voiceModeRef = useRef(false);
   const personaRef = useRef(null);
-  const isIOSRef = useRef(false);
-  const shouldRestartRef = useRef(false);
+  const isNativeRef = useRef(false);
+  const nativePluginRef = useRef(null);
   const listeningRef = useRef(false);
+  const shouldRestartRef = useRef(false);
 
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, loading]);
   useEffect(() => { voiceModeRef.current = voiceMode; }, [voiceMode]);
   useEffect(() => { personaRef.current = persona; }, [persona]);
 
-  // Detect iOS
+  // Initialize speech recognition — native on iOS/Capacitor, web on desktop
   useEffect(() => {
-    if (typeof window !== 'undefined') {
-      var ua = window.navigator.userAgent;
-      isIOSRef.current = /iPad|iPhone|iPod/.test(ua) || (ua.includes('Mac') && 'ontouchend' in document);
+    if (typeof window === 'undefined') return;
+
+    // Check if running inside Capacitor native app
+    var isNative = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
+    isNativeRef.current = isNative;
+
+    if (isNative) {
+      import('@capacitor-community/speech-recognition').then(function(mod) {
+        var SpeechRecognition = mod.SpeechRecognition;
+        nativePluginRef.current = SpeechRecognition;
+        SpeechRecognition.requestPermissions().catch(function() {});
+
+        SpeechRecognition.addListener('partialResults', function(data) {
+          if (data && data.matches && data.matches.length > 0) {
+            var text = data.matches[0];
+            pendingTextRef.current = text;
+            setInput(text);
+
+            if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+            if (autoSendRef.current && text.trim().length > 0) {
+              silenceTimerRef.current = setTimeout(function() {
+                if (pendingTextRef.current.trim()) {
+                  doStopNativeListening().then(function() {
+                    shouldRestartRef.current = false;
+                    autoSendRef.current = false;
+                    setTimeout(function() {
+                      var btn = document.getElementById('auto-send-btn');
+                      if (btn) btn.click();
+                    }, 100);
+                  });
+                }
+              }, 2500);
+            }
+          }
+        });
+
+        SpeechRecognition.addListener('listeningState', function(data) {
+          if (data && data.status === 'stopped') {
+            listeningRef.current = false;
+            setListening(false);
+            if (shouldRestartRef.current && voiceModeRef.current) {
+              setTimeout(function() {
+                if (voiceModeRef.current && !listeningRef.current) {
+                  doStartListeningInternal(true);
+                }
+              }, 500);
+            }
+          }
+        });
+      }).catch(function(err) {
+        console.log('Native speech plugin not available, falling back to web', err);
+        isNativeRef.current = false;
+        initWebSpeech();
+      });
+    } else {
+      initWebSpeech();
     }
   }, []);
 
-  // Speech recognition — iOS-safe version
-  useEffect(() => {
+  function initWebSpeech() {
     if (typeof window === 'undefined') return;
     var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) return;
+    var r = new SR();
+    r.continuous = true;
+    r.interimResults = true;
+    r.lang = 'en-US';
+    r.maxAlternatives = 1;
 
-    function createRecognition() {
-      var r = new SR();
-      // iOS WKWebView: continuous mode is broken — use single-shot and restart
-      r.continuous = !isIOSRef.current;
-      r.interimResults = true;
-      r.lang = 'en-US';
-      r.maxAlternatives = 1;
+    r.onresult = function(event) {
+      var f = '', interim = '';
+      for (var i = 0; i < event.results.length; i++) {
+        if (event.results[i].isFinal) f += event.results[i][0].transcript + ' ';
+        else interim += event.results[i][0].transcript;
+      }
+      var full = (f + interim).trim();
+      pendingTextRef.current = full;
+      setInput(full);
+      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+      if (autoSendRef.current && f.trim().length > 0) {
+        silenceTimerRef.current = setTimeout(function() {
+          if (pendingTextRef.current.trim()) {
+            shouldRestartRef.current = false;
+            try { r.stop(); } catch(e) {}
+          }
+        }, 2000);
+      }
+    };
 
-      r.onresult = function(event) {
-        var f = '', interim = '';
-        for (var i = 0; i < event.results.length; i++) {
-          if (event.results[i].isFinal) f += event.results[i][0].transcript + ' ';
-          else interim += event.results[i][0].transcript;
-        }
-        var full = (f + interim).trim();
-        pendingTextRef.current = full;
-        setInput(full);
-        if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-        if (autoSendRef.current && f.trim().length > 0) {
-          // Longer silence timer on iOS (3s vs 2s) for reliability
-          var delay = isIOSRef.current ? 3000 : 2000;
-          silenceTimerRef.current = setTimeout(function() {
-            if (pendingTextRef.current.trim()) {
-              shouldRestartRef.current = false;
-              try { r.stop(); } catch(e) {}
-            }
-          }, delay);
-        }
-      };
+    r.onend = function() {
+      listeningRef.current = false;
+      setListening(false);
+      if (autoSendRef.current && pendingTextRef.current.trim()) {
+        autoSendRef.current = false;
+        shouldRestartRef.current = false;
+        setTimeout(function() {
+          var btn = document.getElementById('auto-send-btn');
+          if (btn) btn.click();
+        }, 100);
+        return;
+      }
+      if (shouldRestartRef.current && voiceModeRef.current) {
+        setTimeout(function() {
+          if (voiceModeRef.current && !listeningRef.current) {
+            doStartListeningInternal(true);
+          }
+        }, 300);
+      }
+    };
 
-      r.onend = function() {
-        listeningRef.current = false;
-        setListening(false);
-
-        // If we have pending text and auto-send is on, send it
-        if (autoSendRef.current && pendingTextRef.current.trim()) {
-          autoSendRef.current = false;
-          shouldRestartRef.current = false;
-          setTimeout(function() {
-            var btn = document.getElementById('auto-send-btn');
-            if (btn) btn.click();
-          }, 100);
-          return;
-        }
-
-        // iOS: auto-restart if voice mode is still active and we should keep listening
-        if (shouldRestartRef.current && voiceModeRef.current) {
+    r.onerror = function(event) {
+      listeningRef.current = false;
+      setListening(false);
+      if (event.error === 'no-speech' || event.error === 'aborted' || event.error === 'network') {
+        if (voiceModeRef.current && shouldRestartRef.current) {
           setTimeout(function() {
             if (voiceModeRef.current && !listeningRef.current) {
               doStartListeningInternal(true);
             }
-          }, 300);
+          }, 500);
         }
-      };
+      }
+    };
 
-      r.onerror = function(event) {
-        listeningRef.current = false;
-        setListening(false);
-        // On iOS, "no-speech" and "aborted" errors are common — restart if in voice mode
-        if (event.error === 'no-speech' || event.error === 'aborted' || event.error === 'network') {
-          if (voiceModeRef.current && shouldRestartRef.current) {
-            setTimeout(function() {
-              if (voiceModeRef.current && !listeningRef.current) {
-                doStartListeningInternal(true);
-              }
-            }, 500);
-          }
-        }
-      };
+    recognitionRef.current = r;
+  }
 
-      return r;
+  function doStopNativeListening() {
+    if (nativePluginRef.current) {
+      return nativePluginRef.current.stop().catch(function() {});
     }
-
-    recognitionRef.current = createRecognition();
-
-    // On iOS, recreate recognition instance before each start for reliability
-    recognitionRef.current._create = createRecognition;
-  }, []);
+    return Promise.resolve();
+  }
 
   function doStartListeningInternal(auto) {
     if (loading || initializing) return;
@@ -137,29 +181,41 @@ export default function ChatPage() {
     autoSendRef.current = !!auto;
     shouldRestartRef.current = !!auto;
 
-    // iOS: recreate recognition instance each time to avoid stale state
-    if (isIOSRef.current && recognitionRef.current && recognitionRef.current._create) {
-      var newR = recognitionRef.current._create();
-      newR._create = recognitionRef.current._create;
-      recognitionRef.current = newR;
-    }
-
-    try {
-      recognitionRef.current.start();
-      listeningRef.current = true;
-      setListening(true);
-    } catch(e) {
-      // If already started, stop and retry
+    if (isNativeRef.current && nativePluginRef.current) {
+      nativePluginRef.current.start({
+        language: 'en-US',
+        partialResults: true,
+        popup: false,
+      }).then(function() {
+        listeningRef.current = true;
+        setListening(true);
+      }).catch(function(err) {
+        console.log('Native speech start error:', err);
+        if (voiceModeRef.current && shouldRestartRef.current) {
+          setTimeout(function() {
+            if (voiceModeRef.current && !listeningRef.current) {
+              doStartListeningInternal(true);
+            }
+          }, 1000);
+        }
+      });
+    } else if (recognitionRef.current) {
       try {
-        recognitionRef.current.stop();
-        setTimeout(function() {
-          try {
-            recognitionRef.current.start();
-            listeningRef.current = true;
-            setListening(true);
-          } catch(e2) {}
-        }, 300);
-      } catch(e2) {}
+        recognitionRef.current.start();
+        listeningRef.current = true;
+        setListening(true);
+      } catch(e) {
+        try {
+          recognitionRef.current.stop();
+          setTimeout(function() {
+            try {
+              recognitionRef.current.start();
+              listeningRef.current = true;
+              setListening(true);
+            } catch(e2) {}
+          }, 300);
+        } catch(e2) {}
+      }
     }
   }
 
@@ -189,13 +245,12 @@ export default function ChatPage() {
         audio.onended = function() {
           setSpeaking(false);
           audioRef.current = null;
-          if (voiceModeRef.current && recognitionRef.current) {
+          if (voiceModeRef.current) {
             setTimeout(function() { doStartListeningInternal(true); }, 500);
           }
         };
         audio.onerror = function() { setSpeaking(false); audioRef.current = null; };
         audio.play().catch(function() {
-          // iOS autoplay blocked — fall back to browser TTS
           doFallbackSpeak(text, gender);
         });
       } else {
@@ -221,7 +276,7 @@ export default function ChatPage() {
     if (pick) u.voice = pick;
     u.onend = function() {
       setSpeaking(false);
-      if (voiceModeRef.current && recognitionRef.current) {
+      if (voiceModeRef.current) {
         setTimeout(function() { doStartListeningInternal(true); }, 500);
       }
     };
@@ -237,7 +292,11 @@ export default function ChatPage() {
     shouldRestartRef.current = false;
     autoSendRef.current = false;
     if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-    if (recognitionRef.current && listeningRef.current) {
+    if (isNativeRef.current && nativePluginRef.current) {
+      nativePluginRef.current.stop().catch(function() {});
+      listeningRef.current = false;
+      setListening(false);
+    } else if (recognitionRef.current && listeningRef.current) {
       try { recognitionRef.current.stop(); } catch(e) {}
       listeningRef.current = false;
       setListening(false);
@@ -284,7 +343,15 @@ export default function ChatPage() {
     var text = input.trim();
     if (!text || loading || !session) return;
     shouldRestartRef.current = false;
-    if (listening && recognitionRef.current) { try { recognitionRef.current.stop(); } catch(e) {} listeningRef.current = false; setListening(false); }
+    if (listening) {
+      if (isNativeRef.current && nativePluginRef.current) {
+        nativePluginRef.current.stop().catch(function() {});
+      } else if (recognitionRef.current) {
+        try { recognitionRef.current.stop(); } catch(e) {}
+      }
+      listeningRef.current = false;
+      setListening(false);
+    }
     if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
     var userMsg = { role: 'user', content: text };
     var newMsgs = messages.concat([userMsg]);
@@ -321,7 +388,15 @@ export default function ChatPage() {
     shouldRestartRef.current = false;
     if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }
     if (typeof window !== 'undefined' && window.speechSynthesis) window.speechSynthesis.cancel();
-    if (listening && recognitionRef.current) { try { recognitionRef.current.stop(); } catch(e) {} listeningRef.current = false; setListening(false); }
+    if (listening) {
+      if (isNativeRef.current && nativePluginRef.current) {
+        nativePluginRef.current.stop().catch(function() {});
+      } else if (recognitionRef.current) {
+        try { recognitionRef.current.stop(); } catch(e) {}
+      }
+      listeningRef.current = false;
+      setListening(false);
+    }
     var sellerMsgs = messages.filter(function(m) { return m.role === 'user'; });
     if (sellerMsgs.length < 2) { alert('Need at least 2 responses.'); setEnding(false); return; }
     var sp = buildScorecardPrompt(session.scenario, session.difficulty, messages);
