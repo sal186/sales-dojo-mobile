@@ -470,8 +470,8 @@ export default function ChatPage() {
   return (
     <div className="container" style={{ paddingBottom: '16px' }}>
       <div className="chat-header">
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <button onClick={doCleanupAndExit} style={{ background: 'transparent', border: '1px solid #444', borderRadius: '8px', color: 'var(--text-muted)', fontSize: '14px', padding: '4px 10px', cursor: 'pointer', whiteSpace: 'nowrap' }}>← Home</button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+          <button onClick={doCleanupAndExit} style={{ background: 'transparent', border: '1px solid #444', borderRadius: '8px', color: 'var(--text-muted)', fontSize: '12px', padding: '2px 6px', cursor: 'pointer', whiteSpace: 'nowrap' }}>←</button>
           <div className="chat-persona">{personaLabel}</div>
         </div>
         <div className="chat-meta">
