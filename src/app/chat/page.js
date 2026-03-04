@@ -469,16 +469,16 @@ export default function ChatPage() {
 
   return (
     <div className="container" style={{ paddingBottom: '16px' }}>
-      <div className="chat-header">
-        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+      <div className="chat-header" style={{ flexDirection: 'column', gap: '6px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
           <button onClick={doCleanupAndExit} style={{ background: 'transparent', border: '1px solid #444', borderRadius: '8px', color: 'var(--text-muted)', fontSize: '12px', padding: '2px 6px', cursor: 'pointer', whiteSpace: 'nowrap' }}>←</button>
           <div className="chat-persona">{personaLabel}</div>
-        </div>
-        <div className="chat-meta">
+          <button className="end-btn" onClick={doEnd} disabled={ending}>{ending ? 'Scoring...' : 'End & Score'}</button>
+  </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', justifyContent: 'center' }}>
           <span className="chat-turns">Turn {turnCount}</span>
           <span className={'chat-diff ' + session.difficulty}>{session.difficulty}</span>
           <button onClick={function() { if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; } if (typeof window !== 'undefined' && window.speechSynthesis) window.speechSynthesis.cancel(); setSpeaking(false); setVoiceEnabled(!voiceEnabled); }} style={{ background: voiceEnabled ? 'var(--gold)' : '#333', border: 'none', borderRadius: '8px', padding: '4px 8px', fontSize: '16px', cursor: 'pointer' }}>{voiceEnabled ? '🔊' : '🔇'}</button>
-          <button className="end-btn" onClick={doEnd} disabled={ending}>{ending ? 'Scoring...' : 'End & Score'}</button>
         </div>
       </div>
       <div className="msg system">{session.scenario}</div>
