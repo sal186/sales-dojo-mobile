@@ -30,16 +30,17 @@ export default function ChatPage() {
   const nativePluginRef = useRef(null);
   const listeningRef = useRef(false);
   const shouldRestartRef = useRef(false);
+  const loadingRef = useRef(false);
 
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, loading]);
   useEffect(() => { voiceModeRef.current = voiceMode; }, [voiceMode]);
   useEffect(() => { personaRef.current = persona; }, [persona]);
+  useEffect(() => { loadingRef.current = loading; }, [loading]);
 
   // Initialize speech recognition — native on iOS/Capacitor, web on desktop
   useEffect(() => {
     if (typeof window === 'undefined') return;
 
-    // Check if running inside Capacitor native app
     var isNative = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
     isNativeRef.current = isNative;
 
@@ -55,18 +56,13 @@ export default function ChatPage() {
             pendingTextRef.current = text;
             setInput(text);
 
+            // Reset silence timer on every new result
             if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
             if (autoSendRef.current && text.trim().length > 0) {
               silenceTimerRef.current = setTimeout(function() {
-                if (pendingTextRef.current.trim()) {
-                  doStopNativeListening().then(function() {
-                    shouldRestartRef.current = false;
-                    autoSendRef.current = false;
-                    setTimeout(function() {
-                      var btn = document.getElementById('auto-send-btn');
-                      if (btn) btn.click();
-                    }, 100);
-                  });
+                if (pendingTextRef.current.trim() && !loadingRef.current) {
+                  shouldRestartRef.current = false;
+                  doStopAndSend();
                 }
               }, 2500);
             }
@@ -77,9 +73,22 @@ export default function ChatPage() {
           if (data && data.status === 'stopped') {
             listeningRef.current = false;
             setListening(false);
-            if (shouldRestartRef.current && voiceModeRef.current) {
+
+            // KEY FIX: Always try to send pending text when recognition stops
+            if (pendingTextRef.current.trim() && autoSendRef.current && !loadingRef.current) {
+              autoSendRef.current = false;
+              shouldRestartRef.current = false;
               setTimeout(function() {
-                if (voiceModeRef.current && !listeningRef.current) {
+                var btn = document.getElementById('auto-send-btn');
+                if (btn && pendingTextRef.current.trim()) btn.click();
+              }, 150);
+              return;
+            }
+
+            // Auto-restart in voice mode if no text to send
+            if (shouldRestartRef.current && voiceModeRef.current && !loadingRef.current) {
+              setTimeout(function() {
+                if (voiceModeRef.current && !listeningRef.current && !loadingRef.current) {
                   doStartListeningInternal(true);
                 }
               }, 500);
@@ -95,6 +104,24 @@ export default function ChatPage() {
       initWebSpeech();
     }
   }, []);
+
+  function doStopAndSend() {
+    if (isNativeRef.current && nativePluginRef.current) {
+      nativePluginRef.current.stop().then(function() {
+        autoSendRef.current = false;
+        setTimeout(function() {
+          var btn = document.getElementById('auto-send-btn');
+          if (btn && pendingTextRef.current.trim()) btn.click();
+        }, 150);
+      }).catch(function() {
+        autoSendRef.current = false;
+        setTimeout(function() {
+          var btn = document.getElementById('auto-send-btn');
+          if (btn && pendingTextRef.current.trim()) btn.click();
+        }, 150);
+      });
+    }
+  }
 
   function initWebSpeech() {
     if (typeof window === 'undefined') return;
@@ -164,15 +191,8 @@ export default function ChatPage() {
     recognitionRef.current = r;
   }
 
-  function doStopNativeListening() {
-    if (nativePluginRef.current) {
-      return nativePluginRef.current.stop().catch(function() {});
-    }
-    return Promise.resolve();
-  }
-
   function doStartListeningInternal(auto) {
-    if (loading || initializing) return;
+    if (loadingRef.current || initializing) return;
     if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }
     if (typeof window !== 'undefined' && window.speechSynthesis) window.speechSynthesis.cancel();
     setSpeaking(false);
@@ -303,6 +323,24 @@ export default function ChatPage() {
     }
   }
 
+  function doCleanupAndExit() {
+    setVoiceMode(false);
+    shouldRestartRef.current = false;
+    autoSendRef.current = false;
+    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+    if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }
+    if (typeof window !== 'undefined' && window.speechSynthesis) window.speechSynthesis.cancel();
+    if (isNativeRef.current && nativePluginRef.current) {
+      nativePluginRef.current.stop().catch(function() {});
+    } else if (recognitionRef.current) {
+      try { recognitionRef.current.stop(); } catch(e) {}
+    }
+    listeningRef.current = false;
+    setListening(false);
+    setSpeaking(false);
+    router.push('/');
+  }
+
   // Load session
   useEffect(() => {
     var current = storage.getCurrent();
@@ -398,7 +436,7 @@ export default function ChatPage() {
       setListening(false);
     }
     var sellerMsgs = messages.filter(function(m) { return m.role === 'user'; });
-    if (sellerMsgs.length < 2) { alert('Need at least 2 responses.'); setEnding(false); return; }
+    if (sellerMsgs.length < 2) { alert('Need at least 2 responses to generate a scorecard.'); setEnding(false); return; }
     var sp = buildScorecardPrompt(session.scenario, session.difficulty, messages);
     fetch('/api/chat', {
       method: 'POST',
@@ -432,7 +470,10 @@ export default function ChatPage() {
   return (
     <div className="container" style={{ paddingBottom: '16px' }}>
       <div className="chat-header">
-        <div><div className="chat-persona">{personaLabel}</div></div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <button onClick={doCleanupAndExit} style={{ background: 'transparent', border: '1px solid #444', borderRadius: '8px', color: 'var(--text-muted)', fontSize: '14px', padding: '4px 10px', cursor: 'pointer', whiteSpace: 'nowrap' }}>← Home</button>
+          <div className="chat-persona">{personaLabel}</div>
+        </div>
         <div className="chat-meta">
           <span className="chat-turns">Turn {turnCount}</span>
           <span className={'chat-diff ' + session.difficulty}>{session.difficulty}</span>
